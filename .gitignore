@@ -1,0 +1,4 @@
+*.pyc
+*.fasta
+*.sto
+*.json

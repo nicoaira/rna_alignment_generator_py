@@ -1,5 +1,5 @@
 """
-Output handling utilities for saving datasets and metadata.
+Output handling utilities for saving alignments and metadata.
 """
 
 import csv
@@ -19,31 +19,53 @@ class OutputHandler:
         """Initialize the output handler with configuration."""
         self.args = args
     
-    def save_dataset(self, triplets: List, output_dir: Path) -> None:
+    def save_alignments(self, alignments: List, output_dir: Path) -> None:
         """
-        Save the complete dataset with metadata.
+        Save alignments (multi-FASTA) and metadata.
         
         Args:
-            triplets: List of RNA triplets to save
+            alignments: List of AlignmentResult
             output_dir: Directory to save files
         """
-        logger.info(f"Saving dataset with {len(triplets)} triplets to {output_dir}")
-        
+        n = len(alignments)
+        logger.info(f"Saving {n} alignments to {output_dir}")
+
         # Create metadata
-        from core.models import DatasetMetadata
-        metadata = DatasetMetadata.create(self.args, len(triplets))
-        
-        # Save main dataset
-        if self.args.split:
-            self._save_split_dataset(triplets, metadata, output_dir)
-        else:
-            self._save_single_dataset(triplets, metadata, output_dir)
-        
+        from core.models import AlignmentMetadata
+        metadata = AlignmentMetadata.create(self.args, n)
+
+        # Ensure subdir exists
+        align_dir = output_dir / "alignments"
+        align_dir.mkdir(exist_ok=True)
+
+        # Save each alignment as FASTA with gaps and Stockholm with sequence+structure
+        for res in alignments:
+            path = align_dir / f"alignment_{res.alignment_id:05d}.fasta"
+            with open(path, 'w') as f:
+                for leaf in res.leaves:
+                    f.write(f">{leaf.leaf_id}\n")
+                    f.write(leaf.aligned_sequence + "\n")
+
+            # Stockholm format file
+            sto_path = align_dir / f"alignment_{res.alignment_id:05d}.sto"
+            with open(sto_path, 'w') as sf:
+                sf.write("# STOCKHOLM 1.0\n")
+                # Write aligned sequences
+                for leaf in res.leaves:
+                    sf.write(f"{leaf.leaf_id}\t{leaf.aligned_sequence}\n")
+                # Write per-sequence structure annotations
+                for leaf in res.leaves:
+                    sf.write(f"#=GR {leaf.leaf_id} SS {leaf.aligned_structure}\n")
+                # Write per-column conservation mask from root commitment
+                if hasattr(res, 'gc_conservation') and res.gc_conservation:
+                    sf.write(f"#=GC CONS {res.gc_conservation}\n")
+                sf.write("//\n")
+
         # Save metadata
         self._save_metadata(metadata, output_dir / "metadata.json")
-        
-        logger.info("Dataset saved successfully!")
+        logger.info("Alignments saved successfully!")
     
+    # Triplet-specific methods retained for backwards compatibility but unused now
     def _save_single_dataset(self, triplets: List, 
                            metadata, output_dir: Path) -> None:
         """Save dataset as a single file."""

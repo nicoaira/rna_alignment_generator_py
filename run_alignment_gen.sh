@@ -1,0 +1,33 @@
+python main.py \
+--num_alignments 3 \
+--num_cycles 6 \
+--f_conserved_sites 0.2 \
+--seq_min_len 40 \
+--seq_max_len 300 \
+--seq_len_distribution norm \
+--seq_len_mean 120 \
+--seq_len_sd 70 \
+--mod_normalization \
+--normalization_len 50 \
+--f_stem_indels_min 0 --f_stem_indels_max 0.05 \
+--f_stem_indels_mean 0.025 --f_stem_indels_sd 0.015 \
+--stem_min_size 2 --stem_max_size 15 \
+--same_stem_max_n_mod 5 \
+--f_hloop_indels_min 0 --f_hloop_indels_max 0.05 \
+--f_hloop_indels_mean 0.025 --f_hloop_indels_sd 0.015 \
+--hloop_min_size 3 --hloop_max_size 15 \
+--same_hloop_max_n_mod 5 \
+--f_iloop_indels_min 0 --f_iloop_indels_max 0.05 \
+--f_iloop_indels_mean 0.035 --f_iloop_indels_sd 0.015 \
+--iloop_min_size 0 --iloop_max_size 15 \
+--same_iloop_max_n_mod 5 \
+--f_mloop_indels_min 0 --f_mloop_indels_max 0.05 \
+--f_mloop_indels_mean 0.035 --f_mloop_indels_sd 0.015 \
+--mloop_min_size 0 --mloop_max_size 15 \
+--same_mloop_max_n_mod 5 \
+--f_bulge_indels_min 0 --f_bulge_indels_max 0.05 \
+--f_bulge_indels_mean 0.035 --f_bulge_indels_sd 0.015 \
+--bulge_min_size 0 --bulge_max_size 15 \
+--same_bulge_max_n_mod 5 \
+--output_dir mod-counting-dataset \
+--num_workers 16

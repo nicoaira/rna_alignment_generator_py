@@ -1,5 +1,5 @@
 """
-Command-line argument parser for the RNA triplet generator.
+Command-line argument parser for the RNA secondary structure alignment generator.
 """
 
 import argparse
@@ -16,14 +16,18 @@ class SeqLenDistribution(Enum):
 def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        prog="rna_generator",
-        description="Generate RNA triplets (anchor/positive/negative) with modifications."
+        prog="rna_alignment_generator",
+        description="Generate RNA secondary structure alignments by simulating mutations over a binary tree."
     )
     
     # Sequence Generation
     seq_group = parser.add_argument_group("Sequence Generation")
-    seq_group.add_argument("--num_structures", type=int, default=100,
-                          help="Number of structures (anchors) to generate")
+    seq_group.add_argument("--num_alignments", type=int, default=100,
+                          help="Number of alignments to generate")
+    seq_group.add_argument("--num_cycles", type=int, default=3,
+                          help="Number of mutation cycles (tree depth); produces 2^n leaves")
+    seq_group.add_argument("--f_conserved_sites", type=float, default=0.05,
+                          help="Fraction of base-paired positions to conserve (pairing conserved at each node)")
     seq_group.add_argument("--seq_min_len", type=int, default=50,
                           help="Minimum sequence length")
     seq_group.add_argument("--seq_max_len", type=int, default=100,
@@ -36,8 +40,11 @@ def parse_arguments() -> argparse.Namespace:
                           help="Mean for normal distribution of sequence length")
     seq_group.add_argument("--seq_len_sd", type=float, default=10.0,
                           help="Standard deviation for normal distribution of sequence length")
-    seq_group.add_argument("--neg_len_variation", type=int, default=0,
-                          help="Maximum length variation for negative structures")
+
+    # Substitutions
+    mut_group = parser.add_argument_group("Substitutions")
+    mut_group.add_argument("--f_substitution_rate", type=float, default=0.1,
+                           help="Fraction of positions to substitute per child (approximate)")
     
     # Stem Modifications
     stem_group = parser.add_argument_group("Stem Modifications")
@@ -163,18 +170,7 @@ def parse_arguments() -> argparse.Namespace:
     loop_group.add_argument("--same_mloop_max_n_mod", type=int, default=1,
                            help="Maximum modifications per individual multi loop node")
     
-    # Appending Parameters
-    append_group = parser.add_argument_group("Appending Parameters")
-    append_group.add_argument("--appending_event_probability", type=float, default=0.3,
-                             help="Probability that an appending event will occur for a triplet")
-    append_group.add_argument("--both_sides_appending_probability", type=float, default=0.33,
-                             help="Probability to append on both sides (otherwise left or right)")
-    append_group.add_argument("--linker_min", type=int, default=2,
-                             help="Minimum linker length (in bases) for appending event")
-    append_group.add_argument("--linker_max", type=int, default=8,
-                             help="Maximum linker length (in bases) for appending event")
-    append_group.add_argument("--appending_size_factor", type=float, default=1.0,
-                             help="Factor to multiply the anchor length for appended RNA length sampling")
+    # Removed appending/negative sample options from triplet mode
     
     # Modification Normalization
     norm_group = parser.add_argument_group("Modification Normalization")
@@ -190,21 +186,7 @@ def parse_arguments() -> argparse.Namespace:
     perf_group.add_argument("--output_dir", type=str, default="output",
                            help="Directory to save output CSV, metadata, etc.")
     
-    # Visualization
-    viz_group = parser.add_argument_group("Visualization")
-    viz_group.add_argument("--plot", action="store_true",
-                          help="Generate structure plots")
-    viz_group.add_argument("--num_plots", type=int, default=5,
-                          help="Number of triplets to plot")
-    
-    # Dataset Splitting
-    split_group = parser.add_argument_group("Dataset Splitting")
-    split_group.add_argument("--split", action="store_true",
-                            help="Enable splitting the dataset into train/val sets")
-    split_group.add_argument("--train_fraction", type=float, default=0.8,
-                            help="Fraction of data for training")
-    split_group.add_argument("--val_fraction", type=float, default=0.2,
-                            help="Fraction of data for validation")
+    # Visualization (disabled in alignment mode)
     
     # Debug
     debug_group = parser.add_argument_group("Debug")
@@ -214,10 +196,6 @@ def parse_arguments() -> argparse.Namespace:
                             help="Enable detailed timing logs")
     
     args = parser.parse_args()
-
-    # Validate arguments
-    if args.train_fraction + args.val_fraction > 1.0:
-        parser.error("train_fraction + val_fraction cannot exceed 1.0")
 
     # Prevent mixing of fraction-based and count-based modification parameters
     def _check_mix(prefix: str, defaults: tuple):

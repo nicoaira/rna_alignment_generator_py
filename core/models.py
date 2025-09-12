@@ -1,5 +1,5 @@
 """
-Data models for the RNA triplet generator.
+Data models for the RNA alignment generator.
 """
 
 from dataclasses import dataclass
@@ -172,6 +172,46 @@ class DatasetMetadata:
             timestamp=datetime.now().isoformat(),
             parameters=vars(args),
             num_triplets=num_triplets
+        )
+
+
+# Alignment-specific models
+
+@dataclass
+class AlignmentLeaf:
+    """Represents a final leaf sequence and its aligned representation."""
+    leaf_id: str
+    path: str
+    sequence: str
+    structure: str
+    aligned_sequence: str
+    aligned_structure: str
+
+
+@dataclass
+class AlignmentResult:
+    """Represents a single generated alignment with multiple leaves."""
+    alignment_id: int
+    leaves: List[AlignmentLeaf]
+    column_count: int
+    gc_conservation: str
+
+
+@dataclass
+class AlignmentMetadata:
+    """Metadata for generated alignments."""
+    run_id: str
+    timestamp: str
+    parameters: Dict
+    num_alignments: int
+
+    @classmethod
+    def create(cls, args, num_alignments: int) -> 'AlignmentMetadata':
+        return cls(
+            run_id=str(uuid.uuid4()),
+            timestamp=datetime.now().isoformat(),
+            parameters=vars(args),
+            num_alignments=num_alignments,
         )
 
 
