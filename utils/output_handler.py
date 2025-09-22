@@ -7,7 +7,7 @@ import json
 import logging
 import random
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,11 @@ class OutputHandler:
         align_dir = output_dir / "alignments"
         align_dir.mkdir(exist_ok=True)
 
+        export_dataset = getattr(self.args, "prepare_dataset", False)
+        dataset_rows: List[Dict[str, object]] = []
+        conserved_mapping: Dict[str, Dict[str, Dict[int, int]]] = {}
+        sequence_counter = 0
+
         # Save each alignment as FASTA with gaps and Stockholm with sequence+structure
         for res in alignments:
             path = align_dir / f"alignment_{res.alignment_id:05d}.fasta"
@@ -61,8 +66,37 @@ class OutputHandler:
                     sf.write(f"#=GC CONS {res.gc_conservation}\n")
                 sf.write("//\n")
 
+            if export_dataset:
+                alignment_label = self._format_alignment_label(res.alignment_id)
+                alignment_mapping: Dict[str, Dict[int, int]] = {}
+
+                for leaf in res.leaves:
+                    sequence_counter += 1
+                    binary_code = leaf.path if leaf.path else "root"
+                    dataset_rows.append({
+                        'alignment_id': alignment_label,
+                        'sequence_id': sequence_counter,
+                        'binary_code': binary_code,
+                        'sequence': leaf.sequence,
+                        'structure': leaf.structure,
+                    })
+
+                    if res.gc_conservation:
+                        conserved_positions = self._map_conserved_positions(leaf, res.gc_conservation)
+                        if conserved_positions:
+                            alignment_mapping[f"rna_{sequence_counter}"] = conserved_positions
+
+                if alignment_mapping:
+                    conserved_mapping[alignment_label] = alignment_mapping
+
         # Save metadata
         self._save_metadata(metadata, output_dir / "metadata.json")
+
+        if export_dataset:
+            dataset_path = output_dir / "alignment_dataset.tsv"
+            mapping_path = output_dir / "alignment_conserved_mapping.json"
+            self._write_alignment_dataset(dataset_rows, dataset_path)
+            self._write_alignment_mapping(conserved_mapping, mapping_path)
         logger.info("Alignments saved successfully!")
     
     # Triplet-specific methods retained for backwards compatibility but unused now
@@ -202,6 +236,42 @@ class OutputHandler:
             json.dump(metadata.__dict__, f, indent=2)
         
         logger.info(f"Metadata saved to {file_path}")
+
+    def _format_alignment_label(self, alignment_id: int) -> str:
+        """Return a human-friendly alignment label starting at 1."""
+        return f"alignment_{alignment_id + 1}"
+
+    def _map_conserved_positions(self, leaf, conservation: str) -> Dict[int, int]:
+        """Map conserved alignment columns to sequence positions for a leaf."""
+        mapping: Dict[int, int] = {}
+        seq_pos = 0
+        limit = min(len(leaf.aligned_sequence), len(conservation))
+        for idx in range(limit):
+            base = leaf.aligned_sequence[idx]
+            if base != '-':
+                seq_pos += 1
+                if conservation[idx] == '1':
+                    mapping[idx + 1] = seq_pos
+            else:
+                # skip gaps even if column marked conserved
+                continue
+        return mapping
+
+    def _write_alignment_dataset(self, rows: List[Dict[str, object]], file_path: Path) -> None:
+        """Write the alignment dataset rows to a TSV file."""
+        logger.info(f"Saving alignment dataset TSV to {file_path}")
+        fieldnames = ['alignment_id', 'sequence_id', 'binary_code', 'sequence', 'structure']
+        with open(file_path, 'w', newline='') as tsv_file:
+            writer = csv.DictWriter(tsv_file, fieldnames=fieldnames, delimiter='\t')
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
+
+    def _write_alignment_mapping(self, mapping: Dict[str, Dict[str, Dict[int, int]]], file_path: Path) -> None:
+        """Write conserved alignment position mappings to JSON."""
+        logger.info(f"Saving conserved position mapping JSON to {file_path}")
+        with open(file_path, 'w') as json_file:
+            json.dump(mapping, json_file, indent=2)
 
 
 class DatasetAnalyzer:

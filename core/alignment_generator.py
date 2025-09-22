@@ -64,13 +64,25 @@ class AlignmentMutationEngine(ModificationEngine):
     def __init__(self, args):
         super().__init__(args)
         self.event_callback: Optional[Callable[[Dict], None]] = None
-        self._conserved_pairs: Optional[set[int]] = None  # 0-based indices in sequence
+        self._conserved_pairs: Optional[set[int]] = None  # 0-based indices in sequence (legacy)
+        self._is_conserved_index: Optional[Callable[[int], bool]] = None
+        self._is_protected_index: Optional[Callable[[int], bool]] = None
 
     def set_event_callback(self, cb: Optional[Callable[[Dict], None]]):
         self.event_callback = cb
 
     def set_conserved_pairs(self, conserved_zero_based: Optional[set[int]]):
         self._conserved_pairs = conserved_zero_based or set()
+
+    def set_is_conserved_index(self, func: Optional[Callable[[int], bool]]):
+        """Provide a callback to check if a current index maps to a conserved column.
+        This stays correct across index shifts during indel events.
+        """
+        self._is_conserved_index = func
+
+    def set_is_protected_index(self, func: Optional[Callable[[int], bool]]):
+        """Callback to block deletions for indices inside protected spans."""
+        self._is_protected_index = func
 
     def _emit(self, event: Dict):
         if self.event_callback:
@@ -157,7 +169,10 @@ class AlignmentMutationEngine(ModificationEngine):
             right_pos_1b = right_half[len(right_half) - 1 - idx]
             left0 = left_pos_1b - 1
             right0 = right_pos_1b - 1
-            if self._conserved_pairs and (left0 in self._conserved_pairs or right0 in self._conserved_pairs):
+            cons_hit_dynamic = self._is_conserved_index and (self._is_conserved_index(left0) or self._is_conserved_index(right0))
+            cons_hit_static = self._conserved_pairs and (left0 in self._conserved_pairs or right0 in self._conserved_pairs)
+            protected = self._is_protected_index and (self._is_protected_index(left0) or self._is_protected_index(right0))
+            if cons_hit_dynamic or cons_hit_static or protected:
                 continue
             candidates.append(idx)
 
@@ -224,7 +239,18 @@ class AlignmentMutationEngine(ModificationEngine):
                 if current_size <= min_size:
                     return sequence, structure
 
-        pos = random.choice(coords) - 1
+        # Choose a deletable position that is not conserved
+        def _is_cons(i: int) -> bool:
+            if self._is_conserved_index and self._is_conserved_index(i):
+                return True
+            if self._is_protected_index and self._is_protected_index(i):
+                return True
+            return self._conserved_pairs is not None and (i in self._conserved_pairs)
+
+        candidates = [c - 1 for c in coords if not _is_cons(c - 1)]
+        if not candidates:
+            return sequence, structure
+        pos = random.choice(candidates)
         # Emit event
         self._emit({'type': 'delete_loop_base', 'node': node_name, 'pos': pos})
         if pos < len(sequence):
@@ -266,33 +292,54 @@ class AlignmentDatasetGenerator:
         col_map = list(range(length))
         return _EvolutionNode(path="", sequence=sequence, structure=structure, bulge_graph=bulge, col_map=col_map)
 
-    def _select_conserved_pairs(self, structure: str) -> set[int]:
-        pair_map = _pair_map_from_structure(structure)
-        # build unique pairs using left indices
-        pairs = []
-        used = set()
-        for i, j in sorted(pair_map.items()):
-            if i < j and (i, j) not in used and (j, i) not in used:
-                pairs.append((i, j))
-                used.add((i, j))
-        if not pairs:
-            return set()
-        k = max(0, int(round(len(pairs) * self.args.f_conserved_sites)))
-        chosen = set(random.sample(pairs, k)) if k > 0 else set()
-        conserved: set[int] = set()
-        for i, j in chosen:
-            conserved.add(i)
-            conserved.add(j)
-        return conserved
+    def _select_conserved_pairs_with_pairs(self, structure: str) -> tuple[set[int], List[tuple[int, int]]]:
+        """Select conserved paired sites as a fraction of total length.
 
-    def _apply_substitutions(self, sequence: str, structure: str, conserved_pairs: set[int]) -> str:
+        - Computes target sites = round(f_conserved_sites * len(structure)).
+        - Chooses up to target_sites//2 base pairs (2 sites each).
+        - Only considers pairs with separation >= 3 (RNAfold min hairpin loop).
+        - Ensures chosen pairs do not share indices (no overlap of endpoints).
+        """
+        n = len(structure)
+        target_sites = max(0, int(round(self.args.f_conserved_sites * n)))
+        pair_map = _pair_map_from_structure(structure)
+        # Unique pairs (i<j)
+        uniq_pairs: List[tuple[int, int]] = []
+        seen = set()
+        for i, j in pair_map.items():
+            if i < j and (i, j) not in seen and (j, i) not in seen:
+                seen.add((i, j))
+                uniq_pairs.append((i, j))
+        # Respect minimum hairpin loop size
+        uniq_pairs = [(i, j) for (i, j) in uniq_pairs if (j - i - 1) >= 3]
+        if not uniq_pairs or target_sites == 0:
+            return set(), []
+        random.shuffle(uniq_pairs)
+        target_pairs = min(len(uniq_pairs), target_sites // 2)
+        chosen_pairs: List[tuple[int, int]] = []
+        used_indices: set[int] = set()
+        for i, j in uniq_pairs:
+            if len(chosen_pairs) >= target_pairs:
+                break
+            if (i in used_indices) or (j in used_indices):
+                continue
+            chosen_pairs.append((i, j))
+            used_indices.add(i)
+            used_indices.add(j)
+        cols: set[int] = set()
+        for i, j in chosen_pairs:
+            cols.add(i)
+            cols.add(j)
+        return cols, chosen_pairs
+
+    def _apply_substitutions(self, sequence: str, structure: str, conserved_pairs: set[int], pair_override: Optional[Dict[int, int]] = None) -> str:
         if not sequence:
             return sequence
         n = len(sequence)
         n_subs = max(0, int(round(n * self.args.f_substitution_rate)))
         if n_subs == 0:
             return sequence
-        pair_map = _pair_map_from_structure(structure)
+        pair_map = pair_override if pair_override is not None else _pair_map_from_structure(structure)
         indices = list(range(n))
         random.shuffle(indices)
         taken = set()
@@ -303,7 +350,7 @@ class AlignmentDatasetGenerator:
             if idx in taken:
                 continue
             base = seq_list[idx]
-            if idx in pair_map and idx in conserved_pairs:
+            if idx in conserved_pairs and idx in pair_map:
                 partner = pair_map[idx]
                 if partner in taken:
                     continue
@@ -390,22 +437,26 @@ class AlignmentDatasetGenerator:
             pass
         return sampled
 
-    def _mutate_child(self, parent: _EvolutionNode, child_path: str, column_order: List[int], next_col_id_ref: List[int], root_conserved_cols: set[int]) -> _EvolutionNode:
+    def _mutate_child(self, parent: _EvolutionNode, child_path: str, column_order: List[int], next_col_id_ref: List[int], root_conserved_cols: set[int], root_conserved_pair_list: List[tuple[int, int]] | None = None) -> _EvolutionNode:
         # Copy parent state
         seq = parent.sequence
         struct = parent.structure
         bg = self._deepcopy_graph(parent.bulge_graph)
         node = _EvolutionNode(path=child_path, sequence=seq, structure=struct, bulge_graph=bg, col_map=list(parent.col_map))
 
-        # Map root conserved column ids to current sequence indices for this node
-        conserved_indices: set[int] = set()
-        for idx, col_id in enumerate(node.col_map):
-            if col_id in root_conserved_cols:
-                conserved_indices.add(idx)
-
         # Indels using alignment-aware engine
         engine = AlignmentMutationEngine(self.args)
-        engine.set_conserved_pairs(conserved_indices)
+        # Dynamic index->conserved mapping that stays valid during indels
+        engine.set_is_conserved_index(lambda i: (0 <= i < len(node.col_map) and node.col_map[i] in root_conserved_cols))
+        # Protect any index whose column id falls within any conserved pair span (inclusive)
+        protected_spans: List[tuple[int, int]] = []
+        if root_conserved_pair_list:
+            for col_a, col_b in root_conserved_pair_list:
+                a, b = (col_a, col_b) if col_a <= col_b else (col_b, col_a)
+                protected_spans.append((a, b))
+        engine.set_is_protected_index(lambda i: (
+            0 <= i < len(node.col_map) and any(lo <= node.col_map[i] <= hi for (lo, hi) in protected_spans)
+        ))
         engine.set_event_callback(self._event_cb_builder(node, column_order, next_col_id_ref))
 
         sampled = self._sample_mods(engine, node.bulge_graph)
@@ -434,11 +485,58 @@ class AlignmentDatasetGenerator:
         for _ in range(sampled.n_mloop_indels):
             node.sequence, node.structure = engine._modify_loops(node.sequence, node.structure, node.bulge_graph, NodeType.MULTI)
 
-        # Substitutions with compensatory logic on conserved stems
-        node.sequence = self._apply_substitutions(node.sequence, node.structure, conserved_indices)
+        # Substitutions with compensatory logic on conserved stems (recompute indices after indels)
+        conserved_indices_now: set[int] = set()
+        col_to_idx = {col_id: idx for idx, col_id in enumerate(node.col_map)}
+        for idx, col_id in enumerate(node.col_map):
+            if col_id in root_conserved_cols:
+                conserved_indices_now.add(idx)
+        # Build current pair mapping from root conserved pair list
+        pair_override: Dict[int, int] = {}
+        if root_conserved_pair_list:
+            for col_a, col_b in root_conserved_pair_list:
+                ia = col_to_idx.get(col_a)
+                ib = col_to_idx.get(col_b)
+                if ia is not None and ib is not None:
+                    pair_override[ia] = ib
+                    pair_override[ib] = ia
+        node.sequence = self._apply_substitutions(node.sequence, node.structure, conserved_indices_now, pair_override=pair_override)
+        # Enforce complementarity for all conserved pairs present before folding
+        if pair_override:
+            seq_list = list(node.sequence)
+            visited = set()
+            for a, b in list(pair_override.items()):
+                if a in visited or b in visited:
+                    continue
+                if 0 <= a < len(seq_list) and 0 <= b < len(seq_list):
+                    base_a = seq_list[a]
+                    seq_list[b] = _complement(base_a)
+                    visited.add(a); visited.add(b)
+            node.sequence = ''.join(seq_list)
 
-        # Re-fold to get updated structure for downstream nodes
-        node.structure = self.rna_generator.fold_rna(node.sequence)
+        # Re-fold to get updated structure for downstream nodes, enforcing conserved pairs via constraints
+        constraints_pairs: List[tuple[int, int]] = []
+        # Map root column id pairs to current indices in this node
+        col_to_idx = {col_id: idx for idx, col_id in enumerate(node.col_map)}
+        if root_conserved_pair_list:
+            for col_a, col_b in root_conserved_pair_list:
+                ia = col_to_idx.get(col_a)
+                ib = col_to_idx.get(col_b)
+                if ia is not None and ib is not None and 0 <= ia < len(node.sequence) and 0 <= ib < len(node.sequence):
+                    constraints_pairs.append((ia, ib))
+        node.structure = self.rna_generator.fold_rna(node.sequence, constraints_pairs=constraints_pairs)
+        # As a last resort for presentation, force the structure brackets at conserved pairs
+        if root_conserved_pair_list:
+            s_list = list(node.structure)
+            col_to_idx2 = {col_id: idx for idx, col_id in enumerate(node.col_map)}
+            for col_a, col_b in root_conserved_pair_list:
+                ia = col_to_idx2.get(col_a)
+                ib = col_to_idx2.get(col_b)
+                if ia is not None and ib is not None and 0 <= ia < len(s_list) and 0 <= ib < len(s_list):
+                    a, b = (ia, ib) if ia < ib else (ib, ia)
+                    s_list[a] = '('
+                    s_list[b] = ')'
+            node.structure = ''.join(s_list)
         node.bulge_graph = self.bulge_parser.parse_structure(node.structure)
         return node
 
@@ -448,15 +546,15 @@ class AlignmentDatasetGenerator:
         column_order: List[int] = list(root.col_map)
         next_col_id_ref = [len(root.col_map)]  # mutable holder
 
-        # Determine globally conserved columns from root structure (paired positions subset)
-        root_conserved_cols: set[int] = self._select_conserved_pairs(root.structure)
+        # Determine globally conserved columns and conserved pair list from root structure
+        root_conserved_cols, root_conserved_pair_list = self._select_conserved_pairs_with_pairs(root.structure)
 
         current_level = [root]
         for depth in range(self.args.num_cycles):
             next_level: List[_EvolutionNode] = []
             for node in current_level:
-                left_child = self._mutate_child(node, node.path + '0', column_order, next_col_id_ref, root_conserved_cols)
-                right_child = self._mutate_child(node, node.path + '1', column_order, next_col_id_ref, root_conserved_cols)
+                left_child = self._mutate_child(node, node.path + '0', column_order, next_col_id_ref, root_conserved_cols, root_conserved_pair_list)
+                right_child = self._mutate_child(node, node.path + '1', column_order, next_col_id_ref, root_conserved_cols, root_conserved_pair_list)
                 next_level.append(left_child)
                 next_level.append(right_child)
             current_level = next_level

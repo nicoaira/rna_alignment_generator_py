@@ -185,6 +185,10 @@ def parse_arguments() -> argparse.Namespace:
                            help="Number of parallel workers")
     perf_group.add_argument("--output_dir", type=str, default="output",
                            help="Directory to save output CSV, metadata, etc.")
+    perf_group.add_argument("--prepare_dataset", action="store_true", dest="prepare_dataset",
+                           help="When set, produce a TSV dataset and conserved position mapping JSON")
+    perf_group.add_argument("--perpare_dataset", action="store_true", dest="prepare_dataset",
+                           help=argparse.SUPPRESS)
     
     # Visualization (disabled in alignment mode)
     

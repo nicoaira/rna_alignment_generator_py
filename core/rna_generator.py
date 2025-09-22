@@ -65,12 +65,13 @@ class RnaGenerator:
             raise ValueError(f"Unknown distribution: {distribution}")
     
     @staticmethod
-    def fold_rna(sequence: str) -> str:
+    def fold_rna(sequence: str, constraints_pairs: List[Tuple[int, int]] | None = None) -> str:
         """
         Fold an RNA sequence using RNAfold to get the MFE structure.
         
         Args:
             sequence: RNA sequence to fold
+            constraints_pairs: Optional list of 0-based index pairs to force pairing
             
         Returns:
             Dot-bracket structure string
@@ -79,16 +80,30 @@ class RnaGenerator:
             RuntimeError: If RNAfold fails
         """
         try:
-            # Run RNAfold with no PostScript output
+            cmd = ['RNAfold', '--noPS']
+            input_text = sequence + '\n'
+            constraint_line = None
+            if constraints_pairs:
+                # Build constraint string of same length as sequence
+                cons = ['.' for _ in range(len(sequence))]
+                for i, j in constraints_pairs:
+                    if 0 <= i < len(sequence) and 0 <= j < len(sequence):
+                        a, b = (i, j) if i < j else (j, i)
+                        cons[a] = '('
+                        cons[b] = ')'
+                constraint_line = ''.join(cons)
+                cmd = ['RNAfold', '--noPS', '-C']
+                input_text = sequence + '\n' + constraint_line + '\n'
+
             process = subprocess.Popen(
-                ['RNAfold', '--noPS'],
+                cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True
             )
             
-            stdout, stderr = process.communicate(input=sequence + '\n')
+            stdout, stderr = process.communicate(input=input_text)
             
             if process.returncode != 0:
                 raise RuntimeError(f"RNAfold failed: {stderr}")
