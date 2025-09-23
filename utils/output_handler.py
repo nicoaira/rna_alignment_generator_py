@@ -241,17 +241,37 @@ class OutputHandler:
         """Return a human-friendly alignment label starting at 1."""
         return f"alignment_{alignment_id + 1}"
 
-    def _map_conserved_positions(self, leaf, conservation: str) -> Dict[int, int]:
-        """Map conserved alignment columns to sequence positions for a leaf."""
-        mapping: Dict[int, int] = {}
+    def _map_conserved_positions(self, leaf, conservation: str) -> Dict[str, Dict[int, int]]:
+        """Map conserved and non-conserved alignment columns to sequence positions for a leaf."""
+        mapping: Dict[str, Dict[int, int]] = {
+            "5-paired": {},
+            "3-paired": {},
+            "unpaired": {},
+            "unaligned-5-paired": {},
+            "unaligned-3-paired": {},
+            "unaligned-unpaired": {}
+        }
         seq_pos = 0
         limit = min(len(leaf.aligned_sequence), len(conservation))
         for idx in range(limit):
             base = leaf.aligned_sequence[idx]
+            structure_char = leaf.aligned_structure[idx]
             if base != '-':
                 seq_pos += 1
                 if conservation[idx] == '1':
-                    mapping[idx + 1] = seq_pos
+                    if structure_char == "(":
+                        mapping["5-paired"][idx + 1] = seq_pos
+                    elif structure_char == ")":
+                        mapping["3-paired"][idx + 1] = seq_pos
+                    elif structure_char == ".":
+                        mapping["unpaired"][idx + 1] = seq_pos
+                else:  # Not conserved
+                    if structure_char == "(":
+                        mapping["unaligned-5-paired"][idx + 1] = seq_pos
+                    elif structure_char == ")":
+                        mapping["unaligned-3-paired"][idx + 1] = seq_pos
+                    elif structure_char == ".":
+                        mapping["unaligned-unpaired"][idx + 1] = seq_pos
             else:
                 # skip gaps even if column marked conserved
                 continue
