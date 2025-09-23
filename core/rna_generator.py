@@ -65,7 +65,11 @@ class RnaGenerator:
             raise ValueError(f"Unknown distribution: {distribution}")
     
     @staticmethod
-    def fold_rna(sequence: str, constraints_pairs: List[Tuple[int, int]] | None = None) -> str:
+    def fold_rna(
+        sequence: str,
+        constraints_pairs: List[Tuple[int, int]] | None = None,
+        constraints_unpaired: List[int] | None = None,
+    ) -> str:
         """
         Fold an RNA sequence using RNAfold to get the MFE structure.
         
@@ -83,14 +87,19 @@ class RnaGenerator:
             cmd = ['RNAfold', '--noPS']
             input_text = sequence + '\n'
             constraint_line = None
-            if constraints_pairs:
-                # Build constraint string of same length as sequence
+            has_constraints = bool(constraints_pairs) or bool(constraints_unpaired)
+            if has_constraints:
                 cons = ['.' for _ in range(len(sequence))]
-                for i, j in constraints_pairs:
-                    if 0 <= i < len(sequence) and 0 <= j < len(sequence):
-                        a, b = (i, j) if i < j else (j, i)
-                        cons[a] = '('
-                        cons[b] = ')'
+                if constraints_pairs:
+                    for i, j in constraints_pairs:
+                        if 0 <= i < len(sequence) and 0 <= j < len(sequence):
+                            a, b = (i, j) if i < j else (j, i)
+                            cons[a] = '('
+                            cons[b] = ')'
+                if constraints_unpaired:
+                    for idx in constraints_unpaired:
+                        if 0 <= idx < len(sequence) and cons[idx] == '.':
+                            cons[idx] = 'x'
                 constraint_line = ''.join(cons)
                 cmd = ['RNAfold', '--noPS', '-C']
                 input_text = sequence + '\n' + constraint_line + '\n'

@@ -10,6 +10,8 @@ import random
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Callable
 
+from tqdm import tqdm
+
 from .models import (
     AlignmentLeaf,
     AlignmentResult,
@@ -293,15 +295,21 @@ class AlignmentDatasetGenerator:
         return _EvolutionNode(path="", sequence=sequence, structure=structure, bulge_graph=bulge, col_map=col_map)
 
     def _select_conserved_pairs_with_pairs(self, structure: str) -> tuple[set[int], List[tuple[int, int]]]:
-        """Select conserved paired sites as a fraction of total length.
+        """Select conserved sites (paired and unpaired) as a fraction of total length.
 
         - Computes target sites = round(f_conserved_sites * len(structure)).
-        - Chooses up to target_sites//2 base pairs (2 sites each).
+        - Samples both base-paired columns (taken as intact pairs) and unpaired
+          columns so that loop/dot positions can be conserved as well.
         - Only considers pairs with separation >= 3 (RNAfold min hairpin loop).
-        - Ensures chosen pairs do not share indices (no overlap of endpoints).
         """
         n = len(structure)
+        if n == 0:
+            return set(), []
+
         target_sites = max(0, int(round(self.args.f_conserved_sites * n)))
+        if target_sites == 0:
+            return set(), []
+
         pair_map = _pair_map_from_structure(structure)
         # Unique pairs (i<j)
         uniq_pairs: List[tuple[int, int]] = []
@@ -312,25 +320,57 @@ class AlignmentDatasetGenerator:
                 uniq_pairs.append((i, j))
         # Respect minimum hairpin loop size
         uniq_pairs = [(i, j) for (i, j) in uniq_pairs if (j - i - 1) >= 3]
-        if not uniq_pairs or target_sites == 0:
-            return set(), []
         random.shuffle(uniq_pairs)
-        target_pairs = min(len(uniq_pairs), target_sites // 2)
+
+        # Candidate unpaired indices (dots)
+        single_indices: List[int] = [idx for idx, ch in enumerate(structure) if ch == '.']
+        random.shuffle(single_indices)
+
+        chosen_cols: set[int] = set()
         chosen_pairs: List[tuple[int, int]] = []
-        used_indices: set[int] = set()
-        for i, j in uniq_pairs:
-            if len(chosen_pairs) >= target_pairs:
+
+        pair_idx = 0
+        single_idx = 0
+
+        while len(chosen_cols) < target_sites:
+            remaining_pairs = len(uniq_pairs) - pair_idx
+            remaining_singles = len(single_indices) - single_idx
+            if remaining_pairs <= 0 and remaining_singles <= 0:
                 break
-            if (i in used_indices) or (j in used_indices):
+
+            remaining_needed = target_sites - len(chosen_cols)
+            if remaining_needed == 1 and remaining_singles > 0:
+                idx = single_indices[single_idx]
+                single_idx += 1
+                chosen_cols.add(idx)
                 continue
-            chosen_pairs.append((i, j))
-            used_indices.add(i)
-            used_indices.add(j)
-        cols: set[int] = set()
-        for i, j in chosen_pairs:
-            cols.add(i)
-            cols.add(j)
-        return cols, chosen_pairs
+
+            options: List[tuple[str, int]] = []
+            if remaining_singles > 0:
+                options.append(("single", remaining_singles))
+            if remaining_pairs > 0:
+                # Weight pairs by two positions per pair
+                options.append(("pair", remaining_pairs * 2))
+
+            if not options:
+                break
+
+            labels = [label for label, _ in options]
+            weights = [weight for _, weight in options]
+            choice = random.choices(labels, weights=weights, k=1)[0]
+
+            if choice == "single":
+                idx = single_indices[single_idx]
+                single_idx += 1
+                chosen_cols.add(idx)
+            else:
+                i, j = uniq_pairs[pair_idx]
+                pair_idx += 1
+                chosen_pairs.append((i, j))
+                chosen_cols.add(i)
+                chosen_cols.add(j)
+
+        return chosen_cols, chosen_pairs
 
     def _apply_substitutions(self, sequence: str, structure: str, conserved_pairs: set[int], pair_override: Optional[Dict[int, int]] = None) -> str:
         if not sequence:
@@ -433,7 +473,6 @@ class AlignmentDatasetGenerator:
             # Fallback to sequence length derived from any element count
             # We will simply approximate by using sum of all element lengths in mapping or len of any structure string
             # since we do not have the sequence here, leave as: factor computed later per node length
-            # Here we return sampled and scale later when we know sequence length per node
             pass
         return sampled
 
@@ -450,10 +489,13 @@ class AlignmentDatasetGenerator:
         engine.set_is_conserved_index(lambda i: (0 <= i < len(node.col_map) and node.col_map[i] in root_conserved_cols))
         # Protect any index whose column id falls within any conserved pair span (inclusive)
         protected_spans: List[tuple[int, int]] = []
+        paired_root_cols: set[int] = set()
         if root_conserved_pair_list:
             for col_a, col_b in root_conserved_pair_list:
                 a, b = (col_a, col_b) if col_a <= col_b else (col_b, col_a)
                 protected_spans.append((a, b))
+                paired_root_cols.add(col_a)
+                paired_root_cols.add(col_b)
         engine.set_is_protected_index(lambda i: (
             0 <= i < len(node.col_map) and any(lo <= node.col_map[i] <= hi for (lo, hi) in protected_spans)
         ))
@@ -516,6 +558,7 @@ class AlignmentDatasetGenerator:
 
         # Re-fold to get updated structure for downstream nodes, enforcing conserved pairs via constraints
         constraints_pairs: List[tuple[int, int]] = []
+        constraints_unpaired: List[int] = []
         # Map root column id pairs to current indices in this node
         col_to_idx = {col_id: idx for idx, col_id in enumerate(node.col_map)}
         if root_conserved_pair_list:
@@ -524,18 +567,40 @@ class AlignmentDatasetGenerator:
                 ib = col_to_idx.get(col_b)
                 if ia is not None and ib is not None and 0 <= ia < len(node.sequence) and 0 <= ib < len(node.sequence):
                     constraints_pairs.append((ia, ib))
-        node.structure = self.rna_generator.fold_rna(node.sequence, constraints_pairs=constraints_pairs)
+        conserved_single_cols = [col for col in root_conserved_cols if col not in paired_root_cols]
+        for col in conserved_single_cols:
+            idx = col_to_idx.get(col)
+            if idx is not None and 0 <= idx < len(node.sequence):
+                constraints_unpaired.append(idx)
+        node.structure = self.rna_generator.fold_rna(
+            node.sequence,
+            constraints_pairs=constraints_pairs,
+            constraints_unpaired=constraints_unpaired if constraints_unpaired else None,
+        )
         # As a last resort for presentation, force the structure brackets at conserved pairs
         if root_conserved_pair_list:
             s_list = list(node.structure)
-            col_to_idx2 = {col_id: idx for idx, col_id in enumerate(node.col_map)}
             for col_a, col_b in root_conserved_pair_list:
-                ia = col_to_idx2.get(col_a)
-                ib = col_to_idx2.get(col_b)
+                ia = col_to_idx.get(col_a)
+                ib = col_to_idx.get(col_b)
                 if ia is not None and ib is not None and 0 <= ia < len(s_list) and 0 <= ib < len(s_list):
                     a, b = (ia, ib) if ia < ib else (ib, ia)
                     s_list[a] = '('
                     s_list[b] = ')'
+            node.structure = ''.join(s_list)
+        if conserved_single_cols:
+            s_list = list(node.structure)
+            pair_map_current = _pair_map_from_structure(node.structure)
+            for col in conserved_single_cols:
+                idx = col_to_idx.get(col)
+                if idx is None or not (0 <= idx < len(s_list)):
+                    continue
+                ch = s_list[idx]
+                if ch in '()':
+                    partner = pair_map_current.get(idx)
+                    if partner is not None and 0 <= partner < len(s_list):
+                        s_list[partner] = '.'
+                s_list[idx] = '.'
             node.structure = ''.join(s_list)
         node.bulge_graph = self.bulge_parser.parse_structure(node.structure)
         return node
@@ -602,7 +667,7 @@ class AlignmentDatasetGenerator:
 
     def generate_alignments(self) -> List[AlignmentResult]:
         results: List[AlignmentResult] = []
-        for aid in range(self.args.num_alignments):
+        for aid in tqdm(range(self.args.num_alignments), desc="Generating alignments"):
             root = self._init_root()
             res = self._evolve_tree(root)
             # Patch alignment id
