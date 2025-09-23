@@ -7,6 +7,7 @@ fraction of base pairs at each node, and outputs an alignment of leaf sequences.
 import copy
 import logging
 import random
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Callable
 
@@ -666,11 +667,70 @@ class AlignmentDatasetGenerator:
         )
 
     def generate_alignments(self) -> List[AlignmentResult]:
-        results: List[AlignmentResult] = []
-        for aid in tqdm(range(self.args.num_alignments), desc="Generating alignments"):
-            root = self._init_root()
-            res = self._evolve_tree(root)
-            # Patch alignment id
-            res.alignment_id = aid
-            results.append(res)
+        """
+        Generate the complete dataset of alignment results.
+        
+        Returns:
+            List of AlignmentResult objects
+        """
+        logger.info(f"Generating {self.args.num_alignments} alignments using {self.args.num_workers} workers")
+        
+        if self.args.num_workers == 1:
+            # Single-threaded generation
+            return self._generate_sequential()
+        else:
+            # Multi-threaded generation
+            return self._generate_parallel()
+    
+    def _generate_sequential(self) -> List[AlignmentResult]:
+        """Generate alignments sequentially."""
+        results = []
+        
+        with tqdm(total=self.args.num_alignments, desc="Generating alignments") as pbar:
+            for aid in range(self.args.num_alignments):
+                result = self._generate_single_alignment(aid)
+                results.append(result)
+                pbar.update(1)
+        
         return results
+    
+    def _generate_parallel(self) -> List[AlignmentResult]:
+        """Generate alignments in parallel using multiprocessing."""
+        results = []
+        
+        total_work = self.args.num_alignments
+        logger.info(f"Starting parallel generation with {self.args.num_workers} workers.")
+
+        with tqdm(total=total_work, desc="Generating alignments") as pbar:
+            with ProcessPoolExecutor(max_workers=self.args.num_workers) as executor:
+                future_to_index = {
+                    executor.submit(self._generate_single_alignment, aid): aid
+                    for aid in range(total_work)
+                }
+
+                for future in as_completed(future_to_index):
+                    result = future.result()
+                    results.append(result)
+                    pbar.update(1)
+
+        results.sort(key=lambda x: x.alignment_id)
+        return results
+    
+    def _generate_single_alignment(self, alignment_id: int) -> AlignmentResult:
+        """
+        Generate a single alignment.
+        
+        Args:
+            alignment_id: Unique identifier for the alignment
+            
+        Returns:
+            Complete AlignmentResult
+        """
+        import os
+        logger.debug(f"Generating alignment {alignment_id} in process {os.getpid()}")
+        
+        root = self._init_root()
+        result = self._evolve_tree(root)
+        # Set alignment id
+        result.alignment_id = alignment_id
+        return result
