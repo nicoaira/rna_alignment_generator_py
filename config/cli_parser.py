@@ -198,6 +198,8 @@ def parse_arguments() -> argparse.Namespace:
                             help="Enable debug logging")
     debug_group.add_argument("--timing_log", action="store_true",
                             help="Enable detailed timing logs")
+    debug_group.add_argument("--line_width", type=int, default=150,
+                            help="Per-line width for interactive inspection tools")
     
     args = parser.parse_args()
 
